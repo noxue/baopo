@@ -136,6 +136,8 @@ fn main() -> Result<(), reqwest::Error> {
                 let p = p.unwrap();
 
                 let result = check_account(account, p.to_owned());
+                p.times -= 1;
+
             }
         });
     }
@@ -193,7 +195,6 @@ fn check_account(account: Account, proxy: Proxy) -> bool {
     let size = res.read_to_end(&mut data).unwrap();
 
     let captcha = get_captcha(data).unwrap();
-    println!("{:#?}", captcha);
 
     let old = account.app_code < 2014000000;
     let mut result_url = String::new();
@@ -214,16 +215,14 @@ fn check_account(account: Account, proxy: Proxy) -> bool {
     };
 
     let res = res.text().unwrap();
-    println!("{}", result_url);
 
     if res.find("没有查询到该报告相关信息!").is_some() || res.find("发生错误，请稍后重试").is_some() {
         return false;
     }
 
-
     if old {
         account.success = res.find("alert-success").is_some();
-        let rg = Regex::new(r#"<div id="textarea2".*?>(?s:.*?)<center"#).unwrap();
+        let rg = Regex::new(r#"<div id="textarea2".*?>([\s\S]*?)<center"#).unwrap();
         match rg.captures(res.as_str()) {
             Some(v) => {
                 account.content = format!("{}", v.get(1).map_or("", |m| m.as_str()));
@@ -234,7 +233,7 @@ fn check_account(account: Account, proxy: Proxy) -> bool {
         }
     } else {
         account.success = res.find("reportNumArea").is_some();
-        let rg = Regex::new(r#"<div class="reportContent">(?s:.*?)<p align="center""#).unwrap();
+        let rg = Regex::new(r#"<div class="reportContent">([\s\S]*?)<p align="center""#).unwrap();
         match rg.captures(res.as_str()) {
             Some(v) => {
                 account.content = format!("{}", v.get(1).map_or("", |m| m.as_str()));
@@ -249,6 +248,7 @@ fn check_account(account: Account, proxy: Proxy) -> bool {
         return false;
     }
 
+    println!("{:#?}", account);
     true
 }
 
