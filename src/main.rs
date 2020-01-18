@@ -1,16 +1,15 @@
-use structopt::StructOpt;
-use threadpool::ThreadPool;
+use base64::encode;
+use regex::Regex;
+use reqwest::Error as ReqwestError;
+use serde::export::fmt::Error;
+use serde::export::Formatter;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::io::Read;
 use std::sync::mpsc::sync_channel;
 use std::sync::{Arc, Mutex};
-use std::io::Read;
-use base64::encode;
-use serde::{Serialize, Deserialize};
-use regex::Regex;
-use std::collections::HashMap;
-use serde::export::Formatter;
-use serde::export::fmt::Error;
-use reqwest::Error as ReqwestError;
-
+use structopt::StructOpt;
+use threadpool::ThreadPool;
 
 #[derive(Debug, Clone)]
 struct Proxy {
@@ -63,7 +62,13 @@ struct Cli {
     pub finish_code_end: u64,
     #[structopt(short = "t", long = "threads", help = "线程数")]
     pub threads: usize,
-    #[structopt(short = "p", long = "per-proxy-threads", required = false, default_value = "10", help = "每个代理允许执行的线程数")]
+    #[structopt(
+        short = "p",
+        long = "per-proxy-threads",
+        required = false,
+        default_value = "10",
+        help = "每个代理允许执行的线程数"
+    )]
     pub per_proxy_threads: usize,
 }
 
@@ -78,7 +83,6 @@ impl Proxy {
     }
 }
 
-
 fn main() -> Result<(), reqwest::Error> {
     let args = Cli::from_args();
     println!("{:#?}", args);
@@ -92,69 +96,66 @@ fn main() -> Result<(), reqwest::Error> {
     for _ in 0..args.threads {
         let receiver = Arc::clone(&receiver);
         let proxies = Arc::clone(&proxies);
-        pool.execute(move || {
-            loop {
-                let account = receiver.lock().unwrap().recv().unwrap();
-                let mut proxies = proxies.lock().unwrap();
-            //    let proxy = proxies.get_proxy();
-
-
-                let mut p = None;
-                for v in proxies.proxies.values_mut() {
-                    if v.times < 10 {
-                        v.times += 1;
-                        p = Some(v);
-                        break;
-                    }
+        pool.execute(move || loop {
+            let account = receiver.lock().unwrap().recv().unwrap();
+            let mut proxies = proxies.lock().unwrap();
+            let mut p = None;
+            for v in proxies.proxies.values_mut() {
+                if v.times < 10 {
+                    v.times += 1;
+                    p = Some(v);
+                    break;
                 }
-                if p.is_none() {
-                    let v = get_proxy();
-                    let mut v = Proxy::new(v.clone());
-                    let key = format!("{}", proxies.proxies.len());
-                    v.key = key.clone();
-                    proxies.proxies.insert(key.clone(), v.clone());
+            }
+            if p.is_none() {
+                let v = get_proxy();
+                let mut v = Proxy::new(v.clone());
+                let key = format!("{}", proxies.proxies.len());
+                v.key = key.clone();
+                proxies.proxies.insert(key.clone(), v.clone());
 
-                    match check_account(account, v) {
-                        Ok(v) => v,
-                        Err(e) => match e.kind() {
-                            CheckErrorKind::ProxyExpire => {
-                                proxies.proxies.remove(key.clone().as_str());
-                                false
-                            }
-                            _ => false,
-                        }
-                    };
-
-                    continue;
-                }
-
-                let p = p.unwrap();
-                p.times -= 1;
-                match check_account(account, p.to_owned()) {
+                match check_account(account, v) {
                     Ok(v) => v,
                     Err(e) => match e.kind() {
                         CheckErrorKind::ProxyExpire => {
-                            let key = p.key.clone();
-                            proxies.proxies.remove(&key);
+                            proxies.proxies.remove(key.clone().as_str());
                             false
                         }
                         _ => false,
-                    }
+                    },
                 };
+
+                continue;
             }
+
+            let p = p.unwrap();
+            p.times -= 1;
+            match check_account(account, p.to_owned()) {
+                Ok(v) => v,
+                Err(e) => match e.kind() {
+                    CheckErrorKind::ProxyExpire => {
+                        let key = p.key.clone();
+                        proxies.proxies.remove(&key);
+                        false
+                    }
+                    _ => false,
+                },
+            };
         });
     }
 
     let mut app_code = args.app_code;
     loop {
         for finish_code in args.finish_code..args.finish_code_end {
-            sender.send(Account {
-                app_code,
-                finish_code,
-                success: false,
-                content: "".to_string(),
-                count: args.per_proxy_threads,
-            }).unwrap();
+            sender
+                .send(Account {
+                    app_code,
+                    finish_code,
+                    success: false,
+                    content: "".to_string(),
+                    count: args.per_proxy_threads,
+                })
+                .unwrap();
         }
         app_code += 1;
     }
@@ -163,17 +164,18 @@ fn main() -> Result<(), reqwest::Error> {
 fn get_proxy() -> reqwest::Proxy {
     let url = "http://dps.kdlapi.com/api/getdps/?orderid=947758955318965&num=1&pt=1&sep=1";
     let body = reqwest::get(url).unwrap().text().unwrap();
-    return reqwest::Proxy::all(format!("http://{}", body).as_str()).unwrap()
-        .basic_auth("yes", "61e2a8r9");
+    return reqwest::Proxy::http(format!("http://{}", body).as_str()).unwrap();
 }
 
 #[derive(Debug)]
 struct CheckError {
-    v: String
+    v: String,
 }
 
 impl std::error::Error for CheckError {
-    fn description(&self) -> &str { &self.v }
+    fn description(&self) -> &str {
+        &self.v
+    }
 }
 
 impl CheckError {
@@ -202,20 +204,18 @@ impl CheckErrorKind {
     }
 }
 
-
 impl From<CheckErrorKind> for CheckError {
     fn from(kind: CheckErrorKind) -> Self {
         CheckError {
-            v: kind.as_str().to_string()
+            v: kind.as_str().to_string(),
         }
     }
 }
 
-
 impl From<ReqwestError> for CheckError {
     fn from(kind: ReqwestError) -> Self {
         CheckError {
-            v: kind.to_string()
+            v: kind.to_string(),
         }
     }
 }
@@ -223,16 +223,14 @@ impl From<ReqwestError> for CheckError {
 impl From<std::io::Error> for CheckError {
     fn from(kind: std::io::Error) -> Self {
         CheckError {
-            v: kind.to_string()
+            v: kind.to_string(),
         }
     }
 }
 
 impl From<String> for CheckError {
     fn from(v: String) -> Self {
-        CheckError {
-            v
-        }
+        CheckError { v }
     }
 }
 
@@ -243,16 +241,30 @@ impl std::fmt::Display for CheckError {
 }
 
 fn check_account(account: Account, proxy: Proxy) -> Result<bool, CheckError> {
+    let proxy = proxy.proxy.basic_auth("yes", "61e2a8r9");
+    println!("{:#?}", proxy.clone());
+
     let mut account = account;
     let client = reqwest::Client::builder()
-       .proxy(proxy.proxy)
+        .proxy(proxy)
         .cookie_store(true)
         .build()?;
 
+    client
+        .get("https://www.chinadegrees.cn/cqva/gateway.html")
+        .send()?;
 
-    client.get("https://www.chinadegrees.cn/cqva/gateway.html").send()?;
+    
 
-    let mut res = client.get(format!("https://www.chinadegrees.cn/cqva/captcha.html?{}{}", account.app_code, account.finish_code).as_str()).send()?;
+    let mut res = client
+        .get(
+            format!(
+                "https://www.chinadegrees.cn/cqva/captcha.html?{}{}",
+                account.app_code, account.finish_code
+            )
+            .as_str(),
+        )
+        .send()?;
 
     let mut data = vec![];
     res.read_to_end(&mut data)?;
@@ -272,8 +284,9 @@ fn check_account(account: Account, proxy: Proxy) -> Result<bool, CheckError> {
         .header("Referer", "https://www.chinadegrees.cn/cqva/gateway.html").send()?;
 
     let res = res.text()?;
-
-    if res.find("没有查询到该报告相关信息!").is_some() || res.find("发生错误，请稍后重试").is_some() {
+    println!("{:?}", res);
+    if res.find("没有查询到该报告相关信息!").is_some() || res.find("发生错误，请稍后重试").is_some()
+    {
         return Ok(false);
     }
 
@@ -305,21 +318,24 @@ fn check_account(account: Account, proxy: Proxy) -> Result<bool, CheckError> {
         return Ok(false);
     }
 
-    println!("{:#?}", account);
+    println!("=========================================");
     Ok(true)
 }
 
 fn get_captcha(data: Vec<u8>) -> Result<Captcha, String> {
     let data = encode(data.as_slice());
 
-    let mut json = String::from(r#"{"image":""#); //format!(r#"{"image":"{}"}"#, data);
+    let mut json = String::from(r#"{"image":""#);
     json.push_str(data.as_str());
     json.push_str(r#""}"#);
 
     let client = reqwest::Client::new();
-    let mut res = client.post("http://106.13.192.37:19952/captcha/v1")
+    let mut res = client
+        .post("http://106.13.192.37:19952/captcha/v1")
         .header("Content-type", "application/json")
-        .body(json).send().unwrap();
+        .body(json)
+        .send()
+        .unwrap();
 
     let res = res.text().unwrap();
     let captcha = serde_json::from_str(&res);
