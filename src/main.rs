@@ -11,10 +11,13 @@ use regex::Regex;
 use log::{info, warn, error};
 use std::collections::HashMap;
 use std::borrow::Borrow;
+use serde::export::Formatter;
+use serde::export::fmt::Error;
 
 
 #[derive(Debug, Clone)]
 struct Proxy {
+    pub key: String,
     pub proxy: reqwest::Proxy,
     // 当前代理被使用的次数
     pub times: usize,
@@ -86,6 +89,7 @@ struct Cli {
 impl Proxy {
     pub fn new(proxy: reqwest::Proxy) -> Proxy {
         Proxy {
+            key: "".to_string(),
             proxy,
             times: 0,
             expired: false,
@@ -111,7 +115,7 @@ fn main() -> Result<(), reqwest::Error> {
             loop {
                 let mut account = receiver.lock().unwrap().recv().unwrap();
                 let mut proxies = proxies.lock().unwrap();
-//                let proxy = proxies.get_proxy();
+            //    let proxy = proxies.get_proxy();
 
 
                 let mut p = None;
@@ -122,22 +126,43 @@ fn main() -> Result<(), reqwest::Error> {
                         break;
                     }
                 }
-
                 if p.is_none() {
                     let v = get_proxy();
                     let mut v = Proxy::new(v.clone());
                     let key = format!("{}", proxies.proxies.len());
-                    proxies.proxies.insert(key, v.clone());
+                    v.key = key.clone();
+                    proxies.proxies.insert(key.clone(), v.clone());
 
-                    let result = check_account(account, v);
+                    let result = match check_account(account, v) {
+                        Ok(v) => v,
+                        Err(e) => match e.kind() {
+                            CheckErrorKind::ProxyExpire => {
+                                proxies.proxies.remove(key.clone().as_str());
+                                false
+                            }
+                            _ => false,
+                        }
+                    };
+
                     continue;
                 }
 
                 let p = p.unwrap();
-
-                let result = check_account(account, p.to_owned());
                 p.times -= 1;
+                let result = match check_account(account, p.to_owned()) {
+                    Ok(v) => v,
+                    Err(e) => match e.kind() {
+                        CheckErrorKind::ProxyExpire => {
+                            let key = p.key.clone();
+                            proxies.proxies.remove(&key);
+                            false
+                        }
+                        _ => false,
+                    }
+                };
 
+                
+              
             }
         });
     }
@@ -161,40 +186,104 @@ fn main() -> Result<(), reqwest::Error> {
 
 fn get_proxy() -> reqwest::Proxy {
     let url = "http://dps.kdlapi.com/api/getdps/?orderid=947758955318965&num=1&pt=1&sep=1";
-//    let body = reqwest::get(url).unwrap().text().unwrap();
-    let body = "hahaha";
+    // let body = "hahaha";
+    let body = reqwest::get(url).unwrap().text().unwrap();
     return reqwest::Proxy::all(format!("http://{}", body).as_str()).unwrap()
         .basic_auth("yes", "61e2a8r9");
 }
 
-fn check_account(account: Account, proxy: Proxy) -> bool {
+#[derive(Debug)]
+struct CheckError {
+    v: String
+}
+
+impl std::error::Error for CheckError {
+    fn description(&self) -> &str { &self.v }
+}
+
+impl CheckError {
+    pub fn kind(&self) -> CheckErrorKind {
+        match self.v.as_str() {
+            "proxy expire" => CheckErrorKind::ProxyExpire,
+            "captcha error" => CheckErrorKind::CaptchaError,
+            _ => CheckErrorKind::Other,
+        }
+    }
+}
+
+enum CheckErrorKind {
+    ProxyExpire,
+    CaptchaError,
+    Other,
+}
+
+impl CheckErrorKind {
+    pub(crate) fn as_str(&self) -> &'static str {
+        match *self {
+            CheckErrorKind::ProxyExpire => "proxy expire",
+            CheckErrorKind::CaptchaError => "captcha error",
+            _ => "other",
+        }
+    }
+}
+
+
+impl From<CheckErrorKind> for CheckError {
+    fn from(kind: CheckErrorKind) -> Self {
+        CheckError {
+            v: kind.as_str().to_string()
+        }
+    }
+}
+
+use reqwest::Error as ReqwestError;
+
+impl From<ReqwestError> for CheckError {
+    fn from(kind: ReqwestError) -> Self {
+        CheckError {
+            v: kind.to_string()
+        }
+    }
+}
+
+impl From<std::io::Error> for CheckError {
+    fn from(kind: std::io::Error) -> Self {
+        CheckError {
+            v: kind.to_string()
+        }
+    }
+}
+
+impl From<String> for CheckError {
+    fn from(v: String) -> Self {
+        CheckError {
+            v
+        }
+    }
+}
+
+impl std::fmt::Display for CheckError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
+        Ok(())
+    }
+}
+
+fn check_account(account: Account, proxy: Proxy) -> Result<bool, CheckError> {
     let mut account = account;
     let client = reqwest::Client::builder()
-//        .proxy(proxy.proxy)
+       .proxy(proxy.proxy)
         .cookie_store(true)
-        .build().unwrap();
+        .build()?;
 
 
-    let res = match client.get("https://www.chinadegrees.cn/cqva/gateway.html").send() {
-        Ok(v) => v,
-        Err(e) => {
-            error!("{}", e);
-            return false;
-        }
-    };
+    let res = client.get("https://www.chinadegrees.cn/cqva/gateway.html").send()?;
 
-    let mut res = match client.get(format!("https://www.chinadegrees.cn/cqva/captcha.html?{}{}", account.app_code, account.finish_code).as_str()).send() {
-        Ok(v) => v,
-        Err(e) => {
-            error!("{}", e);
-            return false;
-        }
-    };
+    let mut res = client.get(format!("https://www.chinadegrees.cn/cqva/captcha.html?{}{}", account.app_code, account.finish_code).as_str()).send()?;
 
     let mut data = vec![];
-    let size = res.read_to_end(&mut data).unwrap();
+    let size = res.read_to_end(&mut data)?;
 
-    let captcha = get_captcha(data).unwrap();
+    let captcha = get_captcha(data)?;
 
     let old = account.app_code < 2014000000;
     let mut result_url = String::new();
@@ -204,20 +293,14 @@ fn check_account(account: Account, proxy: Proxy) -> bool {
         result_url = format!("http://www.chinadegrees.cn/cqva/report/result.html?appcod={}&finishcod={}&captcha={}&_r=321648", account.app_code.clone(), account.finish_code.clone(), captcha.message.clone());
     }
 
-    let mut res = match client.get(result_url.clone().as_str())
+    let mut res = client.get(result_url.clone().as_str())
         .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/77.0.3865.90 Safari/537.36")
-        .header("Referer", "https://www.chinadegrees.cn/cqva/gateway.html").send() {
-        Ok(v) => v,
-        Err(e) => {
-            error!("{}", e);
-            return false;
-        }
-    };
+        .header("Referer", "https://www.chinadegrees.cn/cqva/gateway.html").send()?;
 
-    let res = res.text().unwrap();
+    let res = res.text()?;
 
     if res.find("没有查询到该报告相关信息!").is_some() || res.find("发生错误，请稍后重试").is_some() {
-        return false;
+        return Ok(false);
     }
 
     if old {
@@ -228,7 +311,7 @@ fn check_account(account: Account, proxy: Proxy) -> bool {
                 account.content = format!("{}", v.get(1).map_or("", |m| m.as_str()));
             }
             _ => {
-                return false;
+                return Ok(false);
             }
         }
     } else {
@@ -239,20 +322,20 @@ fn check_account(account: Account, proxy: Proxy) -> bool {
                 account.content = format!("{}", v.get(1).map_or("", |m| m.as_str()));
             }
             _ => {
-                return false;
+                return Ok(false);
             }
         }
     }
 
     if !account.success {
-        return false;
+        return Ok(false);
     }
 
     println!("{:#?}", account);
-    true
+    Ok(true)
 }
 
-fn get_captcha(data: Vec<u8>) -> Option<Captcha> {
+fn get_captcha(data: Vec<u8>) -> Result<Captcha, String> {
     let data = encode(data.as_slice());
 
     let mut json = String::from(r#"{"image":""#); //format!(r#"{"image":"{}"}"#, data);
@@ -267,7 +350,7 @@ fn get_captcha(data: Vec<u8>) -> Option<Captcha> {
     let res = res.text().unwrap();
     let captcha = serde_json::from_str(&res);
     if let Ok(captcha) = captcha {
-        return Some(captcha);
+        return Ok(captcha);
     }
-    None
+    Err("error".to_string())
 }
