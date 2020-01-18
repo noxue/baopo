@@ -1,18 +1,15 @@
 use structopt::StructOpt;
 use threadpool::ThreadPool;
 use std::sync::mpsc::sync_channel;
-use std::thread::sleep;
-use std::time::Duration;
 use std::sync::{Arc, Mutex};
 use std::io::Read;
 use base64::encode;
 use serde::{Serialize, Deserialize};
 use regex::Regex;
-use log::{info, warn, error};
 use std::collections::HashMap;
-use std::borrow::Borrow;
 use serde::export::Formatter;
 use serde::export::fmt::Error;
+use reqwest::Error as ReqwestError;
 
 
 #[derive(Debug, Clone)]
@@ -38,22 +35,6 @@ impl ProxyList {
             max_per_proxy_threads: count,
         }
     }
-
-//    fn get_proxy(self) -> &'static Proxy {
-//        let mut ps = self.proxies;
-//        for p in ps.values_mut() {
-//            if p.times < self.max_per_proxy_threads as u32 {
-//                p.times += 1;
-//                return p;
-//            }
-//        }
-//
-//        let p = get_proxy();
-//        let p = Proxy::new(p);
-//        let key = format!("{}", ps.len()).as_str();
-//        ps.insert(key.clone(), p.clone());
-//        let t = ps.get(key.clone()).unwrap();
-//    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -108,12 +89,12 @@ fn main() -> Result<(), reqwest::Error> {
     let (sender, receiver) = sync_channel(1);
     let receiver = Arc::new(Mutex::new(receiver));
 
-    for id in 0..args.threads {
+    for _ in 0..args.threads {
         let receiver = Arc::clone(&receiver);
         let proxies = Arc::clone(&proxies);
         pool.execute(move || {
             loop {
-                let mut account = receiver.lock().unwrap().recv().unwrap();
+                let account = receiver.lock().unwrap().recv().unwrap();
                 let mut proxies = proxies.lock().unwrap();
             //    let proxy = proxies.get_proxy();
 
@@ -133,7 +114,7 @@ fn main() -> Result<(), reqwest::Error> {
                     v.key = key.clone();
                     proxies.proxies.insert(key.clone(), v.clone());
 
-                    let result = match check_account(account, v) {
+                    match check_account(account, v) {
                         Ok(v) => v,
                         Err(e) => match e.kind() {
                             CheckErrorKind::ProxyExpire => {
@@ -149,7 +130,7 @@ fn main() -> Result<(), reqwest::Error> {
 
                 let p = p.unwrap();
                 p.times -= 1;
-                let result = match check_account(account, p.to_owned()) {
+                match check_account(account, p.to_owned()) {
                     Ok(v) => v,
                     Err(e) => match e.kind() {
                         CheckErrorKind::ProxyExpire => {
@@ -160,9 +141,6 @@ fn main() -> Result<(), reqwest::Error> {
                         _ => false,
                     }
                 };
-
-                
-              
             }
         });
     }
@@ -180,13 +158,10 @@ fn main() -> Result<(), reqwest::Error> {
         }
         app_code += 1;
     }
-
-    Ok(())
 }
 
 fn get_proxy() -> reqwest::Proxy {
     let url = "http://dps.kdlapi.com/api/getdps/?orderid=947758955318965&num=1&pt=1&sep=1";
-    // let body = "hahaha";
     let body = reqwest::get(url).unwrap().text().unwrap();
     return reqwest::Proxy::all(format!("http://{}", body).as_str()).unwrap()
         .basic_auth("yes", "61e2a8r9");
@@ -236,7 +211,6 @@ impl From<CheckErrorKind> for CheckError {
     }
 }
 
-use reqwest::Error as ReqwestError;
 
 impl From<ReqwestError> for CheckError {
     fn from(kind: ReqwestError) -> Self {
@@ -263,7 +237,7 @@ impl From<String> for CheckError {
 }
 
 impl std::fmt::Display for CheckError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
+    fn fmt(&self, _: &mut Formatter<'_>) -> Result<(), Error> {
         Ok(())
     }
 }
@@ -276,24 +250,24 @@ fn check_account(account: Account, proxy: Proxy) -> Result<bool, CheckError> {
         .build()?;
 
 
-    let res = client.get("https://www.chinadegrees.cn/cqva/gateway.html").send()?;
+    client.get("https://www.chinadegrees.cn/cqva/gateway.html").send()?;
 
     let mut res = client.get(format!("https://www.chinadegrees.cn/cqva/captcha.html?{}{}", account.app_code, account.finish_code).as_str()).send()?;
 
     let mut data = vec![];
-    let size = res.read_to_end(&mut data)?;
+    res.read_to_end(&mut data)?;
 
     let captcha = get_captcha(data)?;
 
     let old = account.app_code < 2014000000;
-    let mut result_url = String::new();
+    let result_url;
     if old {
         result_url = format!("https://www.chinadegrees.cn/cqva/report/rznb/report-rznb.html?appcod={}&finishcod={:010}&captcha={}&_r=12346", account.app_code.clone(), account.finish_code.clone(), captcha.message.clone());
     } else {
         result_url = format!("http://www.chinadegrees.cn/cqva/report/result.html?appcod={}&finishcod={}&captcha={}&_r=321648", account.app_code.clone(), account.finish_code.clone(), captcha.message.clone());
     }
 
-    let mut res = client.get(result_url.clone().as_str())
+    let mut res = client.get(result_url.as_str())
         .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/77.0.3865.90 Safari/537.36")
         .header("Referer", "https://www.chinadegrees.cn/cqva/gateway.html").send()?;
 
